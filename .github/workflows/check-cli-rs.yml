@@ -1,0 +1,62 @@
+name: Native CLI
+
+# Checks packages/cli-rs, the Rust client: formatting, Clippy, the workspace tests, the generated files and the
+# TypeScript reader of the plugin state machine. The package has no `test` script, so check-test.yml's turbo run
+# leaves it out; this workflow runs only when the package or the workflow changes.
+on:
+  pull_request:
+    paths:
+      - packages/cli-rs/**
+      - .github/workflows/check-cli-rs.yml
+  push:
+    branches: [dev]
+    paths:
+      - packages/cli-rs/**
+      - .github/workflows/check-cli-rs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    working-directory: packages/cli-rs
+
+jobs:
+  check:
+    name: Linux
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      # Tests that run the TypeScript side (bun, node_modules, an opencode binary) fail instead of skipping without it,
+      # as in the client's merge lane.
+      OPENCODE_RS_REQUIRE_TS: "1"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+      # Bun and `bun install --frozen-lockfile`: `bun run cargo` fetches OpenTUI's native library, check:drift runs the
+      # TypeScript generators and oracles, and the interop tests and the parity machines run the TypeScript TUI.
+      - uses: ./.github/actions/setup-bun
+      # With no name, rustup installs the toolchain of packages/cli-rs/rust-toolchain.toml, with rustfmt and Clippy.
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          workspaces: packages/cli-rs -> target
+          save-if: ${{ github.ref == 'refs/heads/dev' }}
+      # Also installs OpenTUI's native library into .opentui/, which every later cargo run reuses.
+      - run: bun run cargo fmt --check
+      - run: bun run cargo clippy --locked --workspace --all-targets -- -D warnings
+      # Two tests run a compiled opencode as the Bun it embeds (BUN_BE_BUN=1) and find it on PATH.
+      - name: Build opencode
+        working-directory: packages/cli
+        run: |
+          bun run script/build.ts --single --skip-install
+          echo "$PWD/dist/cli-linux-x64/bin" >> "$GITHUB_PATH"
+      - run: bun run cargo test --locked --workspace --no-fail-fast
+      - run: bun run check:drift
+      - run: bun run parity:machines
